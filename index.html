@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Stretch timer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #1d4b47;
+    --fg: #f3f7f4;
+    --dim: rgba(243,247,244,.62);
+    --line: rgba(243,247,244,.28);
+    --font: "Familjen Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  body.rest { --bg: #e9d9b8; --fg: #3a2a14; --dim: rgba(58,42,20,.62); --line: rgba(58,42,20,.28); }
+  body.idle { --bg: #26323a; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg); font-family: var(--font);
+    transition: background .5s, color .5s;
+    display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+    padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
+  }
+  header { text-align: center; min-height: 3.5rem; }
+  #phase { font-size: clamp(1.6rem, 6vw, 2.4rem); font-weight: 700; margin: 0; }
+  #round { color: var(--dim); margin: .25rem 0 0; font-size: 1.05rem; }
+  main { position: relative; width: min(78vw, 56vh, 420px); aspect-ratio: 1; }
+  svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  circle { fill: none; stroke-width: 6; }
+  .track { stroke: var(--line); }
+  #arc { stroke: var(--fg); stroke-linecap: round; }
+  #time {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    font-size: clamp(5rem, 24vw, 9rem); font-weight: 700; font-variant-numeric: tabular-nums;
+    line-height: 1; letter-spacing: -.02em;
+  }
+  .controls { display: flex; gap: 12px; }
+  button {
+    font: inherit; font-weight: 700; color: var(--fg); background: transparent;
+    border: 2px solid var(--line); border-radius: 999px; padding: .8rem 1.5rem; cursor: pointer; min-width: 6.5rem;
+  }
+  button.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); min-width: 8.5rem; }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--fg); outline-offset: 3px; }
+  .settings { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; align-items: end; }
+  label { display: flex; flex-direction: column; gap: 4px; color: var(--dim); font-size: .9rem; }
+  input[type=number] {
+    font: inherit; font-size: 1.2rem; font-weight: 700; width: 5.5rem; padding: .45rem .6rem;
+    color: var(--fg); background: transparent; border: 2px solid var(--line); border-radius: 12px;
+  }
+  .sound { flex-direction: row; align-items: center; gap: 8px; padding-bottom: .55rem; }
+  .sound input { width: 1.2rem; height: 1.2rem; accent-color: var(--fg); }
+  @media (prefers-reduced-motion: reduce) { body { transition: none; } }
+</style>
+</head>
+<body class="idle">
+  <header>
+    <h1 id="phase">Ready</h1>
+    <p id="round">Press start</p>
+  </header>
+
+  <main aria-live="off">
+    <svg viewBox="0 0 100 100" aria-hidden="true">
+      <circle class="track" cx="50" cy="50" r="46"/>
+      <circle id="arc" cx="50" cy="50" r="46"/>
+    </svg>
+    <div id="time" role="timer">50</div>
+  </main>
+
+  <section>
+    <div class="controls" style="justify-content:center;margin-bottom:22px">
+      <button id="start" class="primary">Start</button>
+      <button id="reset">Reset</button>
+    </div>
+    <div class="settings">
+      <label>Stretch (sec)<input id="workIn" type="number" min="1" max="3600" value="50" inputmode="numeric"></label>
+      <label>Rest (sec)<input id="restIn" type="number" min="0" max="3600" value="10" inputmode="numeric"></label>
+      <label class="sound"><input id="sound" type="checkbox" checked>Beep</label>
+    </div>
+  </section>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const phaseEl = $('phase'), roundEl = $('round'), timeEl = $('time'), arc = $('arc');
+  const startBtn = $('start'), resetBtn = $('reset');
+  const workIn = $('workIn'), restIn = $('restIn'), soundIn = $('sound');
+  const C = 2 * Math.PI * 46;
+  arc.style.strokeDasharray = C;
+
+  let work = 50, rest = 10, round = 1, phase = 'work';
+  let running = false, endAt = 0, remainingMs = 0, tick = null, wakeLock = null, audio = null;
+
+  try {
+    const s = JSON.parse(localStorage.getItem('stretch-timer') || '{}');
+    if (s.work) workIn.value = s.work;
+    if (s.rest !== undefined) restIn.value = s.rest;
+    if (s.sound === false) soundIn.checked = false;
+  } catch (e) {}
+
+  const save = () => {
+    try { localStorage.setItem('stretch-timer', JSON.stringify({ work, rest, sound: soundIn.checked })); } catch (e) {}
+  };
+  const readSettings = () => {
+    work = Math.max(1, parseInt(workIn.value, 10) || 50);
+    rest = Math.max(0, parseInt(restIn.value, 10) || 0);
+    save();
+  };
+  const phaseMs = () => (phase === 'work' ? work : rest) * 1000;
+
+  function beep(freq, dur) {
+    if (!soundIn.checked) return;
+    try {
+      audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+      const o = audio.createOscillator(), g = audio.createGain();
+      o.frequency.value = freq; o.connect(g); g.connect(audio.destination);
+      g.gain.setValueAtTime(.25, audio.currentTime);
+      g.gain.exponentialRampToValueAtTime(.001, audio.currentTime + dur);
+      o.start(); o.stop(audio.currentTime + dur);
+    } catch (e) {}
+  }
+
+  function render(ms) {
+    const total = phaseMs() || 1;
+    timeEl.textContent = Math.ceil(ms / 1000);
+    arc.style.strokeDashoffset = C * (1 - Math.max(0, Math.min(1, ms / total)));
+  }
+  function paint() {
+    document.body.className = !running && remainingMs === phaseMs() && phase === 'work' && round === 1 ? 'idle' : phase;
+    phaseEl.textContent = phase === 'work' ? 'Stretch' : 'Rest';
+    roundEl.textContent = 'Round ' + round;
+  }
+
+  function nextPhase() {
+    if (phase === 'work') {
+      if (rest > 0) { phase = 'rest'; beep(660, .35); }
+      else { round++; beep(880, .2); }
+    } else { phase = 'work'; round++; beep(880, .2); }
+    remainingMs = phaseMs();
+    endAt = performance.now() + remainingMs;
+    paint();
+  }
+
+  function loop() {
+    const now = performance.now();
+    let left = endAt - now;
+    while (left <= 0) { nextPhase(); left = endAt - now; if (!phaseMs()) break; }
+    remainingMs = left;
+    render(left);
+    const lastSecs = Math.ceil(left / 1000);
+    if (lastSecs <= 3 && lastSecs !== loop.lastBeep && phase === 'work') { loop.lastBeep = lastSecs; beep(520, .08); }
+  }
+
+  async function lockScreen() {
+    try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+  }
+  function unlockScreen() { try { wakeLock && wakeLock.release(); } catch (e) {} wakeLock = null; }
+
+  function start() {
+    if (!running && remainingMs === phaseMs() && round === 1 && phase === 'work') readSettings();
+    running = true;
+    endAt = performance.now() + remainingMs;
+    tick = setInterval(loop, 100);
+    startBtn.textContent = 'Pause';
+    lockScreen(); beep(880, .2); paint(); loop();
+  }
+  function pause() {
+    running = false; clearInterval(tick);
+    remainingMs = Math.max(0, endAt - performance.now());
+    startBtn.textContent = 'Resume';
+    unlockScreen();
+  }
+  function reset() {
+    running = false; clearInterval(tick); unlockScreen();
+    readSettings(); phase = 'work'; round = 1; remainingMs = work * 1000;
+    startBtn.textContent = 'Start';
+    phaseEl.textContent = 'Ready'; roundEl.textContent = 'Press start';
+    document.body.className = 'idle';
+    render(remainingMs);
+  }
+
+  startBtn.onclick = () => (running ? pause() : start());
+  resetBtn.onclick = reset;
+  [workIn, restIn].forEach(i => i.addEventListener('change', () => { if (!running) reset(); else readSettings(); }));
+  soundIn.addEventListener('change', save);
+  document.addEventListener('keydown', e => {
+    if (e.code === 'Space' && !/INPUT/.test(document.activeElement.tagName)) { e.preventDefault(); startBtn.click(); }
+  });
+  document.addEventListener('visibilitychange', () => { if (running && document.visibilityState === 'visible') { lockScreen(); loop(); } });
+
+  reset();
+})();
+</script>
+</body>
+</html>
